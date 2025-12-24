@@ -271,9 +271,8 @@ public static class CommandExtensions
 
             config.MSystem = selectedMsystem;
             config.Version = msys2Version;  // Store version in YYYY-MM-DD format
-            config.Mirror = mirror;
-            // Base URL is the directory containing MSYS2 files
             config.BaseUrl = "https://repo.msys2.org/distrib/x86_64/";
+            config.Mirror = mirror;
             config.AutoUpdate = true;
 
             await confService.SaveConfigurationAsync(config);

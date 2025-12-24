@@ -113,8 +113,9 @@ public class InitCommand : Command
             var config = new Msys2Configuration
             {
                 MSystem = MSystem ?? "UCRT64",
+                Version = msys2Version,
+                BaseUrl = "https://repo.msys2.org/distrib/x86_64/",
                 Mirror = Mirror,
-                BaseUrl = $"https://github.com/msys2/msys2-installer/releases/download/{msys2Version}/",
                 AutoUpdate = true
             };
 
