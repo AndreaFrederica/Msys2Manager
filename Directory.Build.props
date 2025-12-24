@@ -1,0 +1,13 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>Msys2Manager</RootNamespace>
+    <Authors>Luna Launcher Contributors</Authors>
+    <Company>Prism Launcher</Company>
+    <Product>M2M - MSYS2 Management Tool</Product>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+</Project>

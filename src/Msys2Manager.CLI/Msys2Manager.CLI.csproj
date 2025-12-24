@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>m2m</AssemblyName>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>m2m</ToolCommandName>
+    <PackageId>Msys2Manager.CLI</PackageId>
+
+    <!-- AOT / Native AOT Publishing -->
+    <PublishAot>true</PublishAot>
+    <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
+    <IlcFoldIdenticalMethodBodies>true</IlcFoldIdenticalMethodBodies>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Strip symbols from native binary for smaller size -->
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Msys2Manager.Core\Msys2Manager.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
+  </ItemGroup>
+
+</Project>
