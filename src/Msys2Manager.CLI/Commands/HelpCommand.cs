@@ -33,9 +33,9 @@ public class HelpCommand : Command
             return 0;
         }
 
-        public async Task<int> InvokeAsync(InvocationContext context)
+        public Task<int> InvokeAsync(InvocationContext context)
         {
-            return Invoke(context);
+            return Task.FromResult(Invoke(context));
         }
 
         private void ShowGeneralHelp(IConsole console)

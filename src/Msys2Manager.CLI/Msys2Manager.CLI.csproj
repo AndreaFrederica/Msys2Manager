@@ -9,6 +9,7 @@
 
     <!-- AOT / Native AOT Publishing -->
     <PublishAot>true</PublishAot>
+    <SelfContained>true</SelfContained>
     <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
     <IlcFoldIdenticalMethodBodies>true</IlcFoldIdenticalMethodBodies>
     <InvariantGlobalization>true</InvariantGlobalization>

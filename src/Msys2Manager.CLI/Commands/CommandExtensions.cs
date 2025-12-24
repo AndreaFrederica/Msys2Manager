@@ -11,7 +11,7 @@ public static class CommandExtensions
     {
         // Help command
         var help = new HelpCommand();
-        help.SetHandler<string?>(async (command) =>
+        help.SetHandler<string?>((command) =>
         {
             var console = Console.Out;
 
@@ -45,12 +45,11 @@ public static class CommandExtensions
                 console.Write("For more information about a command, run:\n");
                 console.Write("  m2m help [command]\n");
                 Environment.ExitCode = 0;
-                return;
             }
 
             console.Write($"\nHelp for '{command}':\n\n");
 
-            switch (command.ToLower())
+            switch (command?.ToLower())
             {
                 case "init":
                     console.Write("USAGE:\n");
@@ -218,7 +217,7 @@ public static class CommandExtensions
                 return;
             }
 
-            var config = services.GetRequiredService<Msys2Manager.Core.Configuration.Msys2Configuration>();
+            var config = new Msys2Manager.Core.Configuration.Msys2Configuration();
             var projectRoot = confService.GetProjectRoot();
             var configPath = fs.Path.Combine(projectRoot, "msys2.toml");
 
@@ -272,7 +271,10 @@ public static class CommandExtensions
 
             config.MSystem = selectedMsystem;
             config.Mirror = mirror;
-            config.BaseUrl = $"https://github.com/msys2/msys2-installer/releases/download/{msys2Version}/";
+            // Use repo.msys2.org as the base URL
+            // Version is in YYYY-MM-DD format, need to convert to YYYYMMDD for download
+            var versionForDownload = msys2Version.Replace("-", "");
+            config.BaseUrl = $"https://repo.msys2.org/distrib/x86_64/{versionForDownload}/";
             config.AutoUpdate = true;
 
             await confService.SaveConfigurationAsync(config);
@@ -458,7 +460,7 @@ public static class CommandExtensions
 
         // Shell command
         var shell = new ShellCommand();
-        shell.SetHandler(async () =>
+        shell.SetHandler(() =>
         {
             var env = services.GetRequiredService<Msys2Manager.Core.Services.IEnvironmentService>();
             var conf = services.GetRequiredService<Msys2Manager.Core.Services.IConfigurationService>();
@@ -467,10 +469,11 @@ public static class CommandExtensions
             {
                 Console.Error.Write("MSYS2 is not installed. Run 'm2m bootstrap' first.\n");
                 Environment.ExitCode = 1;
+                return;
             }
 
             var msysRoot = env.GetMsys2Root();
-            var config = await conf.LoadConfigurationAsync();
+            var config = conf.LoadConfigurationAsync().GetAwaiter().GetResult();
             var projectRoot = conf.GetProjectRoot();
 
             var msysBat = System.IO.Path.Combine(msysRoot, "msys64", "msys2.exe");

@@ -95,8 +95,8 @@ public class ConfigurationService : IConfigurationService
             ["msys2"] = new TomlTable
             {
                 ["msystem"] = configuration.MSystem,
-                ["base_url"] = configuration.BaseUrl,
-                ["mirror"] = configuration.Mirror,
+                ["base_url"] = configuration.BaseUrl ?? string.Empty,
+                ["mirror"] = configuration.Mirror ?? string.Empty,
                 ["auto_update"] = configuration.AutoUpdate
             },
             ["packages"] = new TomlTable()

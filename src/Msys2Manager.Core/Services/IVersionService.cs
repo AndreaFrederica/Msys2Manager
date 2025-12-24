@@ -37,18 +37,25 @@ public class VersionService : IVersionService
 
             var content = await response.Content.ReadAsStringAsync(cancellationToken);
 
-            // Parse HTML to find directory links (version directories)
-            // The HTML contains links like: <a href="2024-01-13/">2024-01-13/</a>
-            var regex = new Regex(@"<a\s+href=""(\d{4}-\d{2}-\d{2})/""", RegexOptions.Compiled);
+            // Parse HTML to find msys2-base-x86_64-<version>.tar.zst files
+            // Format: msys2-base-x86_64-YYYYMMDD.tar.zst
+            // Extract YYYYMMDD and convert to YYYY-MM-DD format
+            var regex = new Regex(@"msys2-base-x86_64-(\d{4})(\d{2})(\d{2})\.tar\.", RegexOptions.Compiled);
             var matches = regex.Matches(content);
 
             var versions = new List<string>();
             foreach (Match match in matches)
             {
-                if (match.Success && match.Groups.Count > 1)
+                if (match.Success && match.Groups.Count > 3)
                 {
-                    versions.Add(match.Groups[1].Value);
-                    ValidVersions.Add(match.Groups[1].Value);
+                    var year = match.Groups[1].Value;
+                    var month = match.Groups[2].Value;
+                    var day = match.Groups[3].Value;
+                    var version = $"{year}-{month}-{day}";
+                    if (ValidVersions.Add(version))
+                    {
+                        versions.Add(version);
+                    }
                 }
             }
 
@@ -63,6 +70,6 @@ public class VersionService : IVersionService
     public async Task<string> GetLatestVersionAsync(CancellationToken cancellationToken = default)
     {
         var versions = await GetAvailableVersionsAsync(cancellationToken);
-        return versions.FirstOrDefault() ?? "2024-01-13";
+        return versions.FirstOrDefault() ?? "2025-12-13";
     }
 }

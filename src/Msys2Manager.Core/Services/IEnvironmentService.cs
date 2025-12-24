@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.IO.Abstractions;
+using SharpCompress.Archives;
+using SharpCompress.Common;
 
 namespace Msys2Manager.Core.Services;
 
@@ -69,10 +71,20 @@ public class EnvironmentService : IEnvironmentService
 
         // 支持 base_url 两种格式:
         // 1. 完整文件 URL: "https://repo.msys2.org/distrib/x86_64/msys2-base-x86_64-20251213.tar.zst"
-        // 2. 目录 URL: "https://github.com/msys2/msys2-installer/releases/download/2024-01-13/"
-        var downloadUrl = baseUrl.AbsolutePath.EndsWith(".tar.zst")
-            ? baseUrl
-            : new Uri(baseUrl, "msys2-base-x86_64.tar.zst");
+        // 2. 目录 URL: "https://repo.msys2.org/distrib/x86_64/20251213/"
+        Uri downloadUrl;
+        if (baseUrl.AbsolutePath.EndsWith(".tar.zst") || baseUrl.AbsolutePath.EndsWith(".tar.xz"))
+        {
+            downloadUrl = baseUrl;
+        }
+        else
+        {
+            // Extract version from baseUrl path (e.g., "20251213" from ".../distrib/x86_64/20251213/")
+            var pathSegments = baseUrl.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            var version = pathSegments.Length > 0 ? pathSegments[^1] : "20251213";
+            // Prefer .tar.zst as it's smaller (zstd compression)
+            downloadUrl = new Uri(baseUrl, $"msys2-base-x86_64-{version}.tar.zst");
+        }
 
         var fileName = System.IO.Path.GetFileName(downloadUrl.LocalPath);
         var downloadPath = _fileSystem.Path.Combine(tmpPath, fileName);
@@ -90,7 +102,7 @@ public class EnvironmentService : IEnvironmentService
         return true;
     }
 
-    public async Task RemoveMsys2Async(bool force = false, CancellationToken cancellationToken = default)
+    public Task RemoveMsys2Async(bool force = false, CancellationToken cancellationToken = default)
     {
         if (!force)
         {
@@ -98,7 +110,7 @@ public class EnvironmentService : IEnvironmentService
             var response = Console.ReadLine();
             if (!response?.Equals("y", StringComparison.OrdinalIgnoreCase) ?? true)
             {
-                return;
+                return Task.CompletedTask;
             }
         }
 
@@ -108,6 +120,8 @@ public class EnvironmentService : IEnvironmentService
         {
             _fileSystem.Directory.Delete(msysRoot, true);
         }
+
+        return Task.CompletedTask;
     }
 
     public async Task<int> ExecuteCommandAsync(string command, string? workingDirectory = null, CancellationToken cancellationToken = default)
@@ -209,56 +223,42 @@ public class EnvironmentService : IEnvironmentService
 
     private async Task ExtractArchiveAsync(string archivePath, string destination, IProgress<float>? progress, CancellationToken cancellationToken)
     {
-        var zstdPath = await FindOrDownloadZstdAsync(cancellationToken);
-
-        var startInfo = new ProcessStartInfo
+        // SharpCompress supports .tar.zst (zstd), .tar.xz, .tar.gz, etc. directly
+        await Task.Run(() =>
         {
-            FileName = zstdPath,
-            Arguments = $"-d \"{archivePath}\" -fo \"{archivePath}.tar\"",
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
+            _fileSystem.Directory.CreateDirectory(destination);
 
-        using var zstd = Process.Start(startInfo);
-        await zstd!.WaitForExitAsync(cancellationToken);
+            using var archive = ArchiveFactory.Open(archivePath);
+            var entries = archive.Entries.Where(x => !x.IsDirectory).ToArray();
+            var totalEntries = entries.Length;
+            var extracted = 0;
 
-        var tarArgs = $"-xf \"{archivePath}.tar\" -C \"{destination}\"";
+            foreach (var entry in entries)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
 
-        startInfo = new ProcessStartInfo
+                entry.WriteToDirectory(destination, new ExtractionOptions
+                {
+                    ExtractFullPath = true,
+                    Overwrite = true
+                });
+
+                extracted++;
+
+                // Report progress: 0.5 to 1.0 (50% to 100%)
+                if (progress is not null && totalEntries > 0)
+                {
+                    var percent = 0.5f + (float)extracted / totalEntries * 0.5f;
+                    progress.Report(percent);
+                }
+            }
+        }, cancellationToken);
+
+        // Clean up extracted intermediate file if exists
+        var tarPath = archivePath + ".tar";
+        if (_fileSystem.File.Exists(tarPath))
         {
-            FileName = "tar",
-            Arguments = tarArgs,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using var tar = Process.Start(startInfo);
-        await tar!.WaitForExitAsync(cancellationToken);
-    }
-
-    private async Task<string> FindOrDownloadZstdAsync(CancellationToken cancellationToken)
-    {
-        var systemPaths = new[]
-        {
-            @"C:\Program Files\7-Zip\zstd.exe",
-            @"C:\Program Files (x86)\7-Zip\zstd.exe"
-        };
-
-        foreach (var path in systemPaths)
-        {
-            if (_fileSystem.File.Exists(path))
-                return path;
+            _fileSystem.File.Delete(tarPath);
         }
-
-        var tmpPath = GetTmpPath();
-        var zstdPath = _fileSystem.Path.Combine(tmpPath, "zstd.exe");
-
-        if (!_fileSystem.File.Exists(zstdPath))
-        {
-            await DownloadFileAsync(new Uri("https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-v1.5.6-win64.zip"), zstdPath + ".zip", null, cancellationToken);
-            await ExtractArchiveAsync(zstdPath + ".zip", tmpPath, null, cancellationToken);
-        }
-
-        return zstdPath;
     }
 }
