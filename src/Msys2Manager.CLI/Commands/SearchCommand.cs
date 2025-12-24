@@ -5,34 +5,28 @@ using System.CommandLine.Invocation;
 
 namespace Msys2Manager.CLI.Commands;
 
-public class SyncCommand : Command
+public class SearchCommand : Command
 {
-    public readonly Option<bool> PruneOption;
+    public readonly Argument<string[]> QueryArgument;
 
-    public SyncCommand() : base("sync", "Sync installed packages with configuration")
+    public SearchCommand() : base("search", "Search for packages in MSYS2 repositories")
     {
-        PruneOption = new Option<bool>(
-            ["--prune", "-p"],
-            "Remove packages not in configuration"
-        );
-
-        AddOption(PruneOption);
+        QueryArgument = new Argument<string[]>("query", "Search query (one or more terms)");
+        AddArgument(QueryArgument);
     }
 
     public new class Handler : ICommandHandler
     {
-        private readonly IPackageService _packages;
         private readonly IEnvironmentService _environment;
         private readonly IConfigurationService _configuration;
 
-        public Handler(IPackageService packages, IEnvironmentService environment, IConfigurationService configuration)
+        public Handler(IEnvironmentService environment, IConfigurationService configuration)
         {
-            _packages = packages;
             _environment = environment;
             _configuration = configuration;
         }
 
-        public bool Prune { get; set; }
+        public string[] Query { get; set; } = Array.Empty<string>();
 
         public int Invoke(InvocationContext context)
         {
@@ -49,17 +43,31 @@ public class SyncCommand : Command
                 return 1;
             }
 
-            console.Out.Write("Syncing packages...\n");
+            if (Query.Length == 0)
+            {
+                console.Error.Write("Error: Search query is required.\n");
+                return 1;
+            }
+
+            var searchTerm = string.Join(" ", Query);
+            console.Out.Write($"Searching for \"{searchTerm}\"...\n\n");
 
             try
             {
-                await _packages.SyncPackagesAsync(Prune, context.GetCancellationToken());
+                var results = await SearchPackagesAsync(searchTerm, context.GetCancellationToken());
 
-                // Generate lock file after syncing
-                await GenerateLockFileAsync(context.GetCancellationToken());
-                console.Out.Write("Generating msys2.lock...\n");
-                console.Out.Write("Sync complete.\n");
+                if (results.Count == 0)
+                {
+                    console.Out.Write("No packages found.\n");
+                    return 0;
+                }
 
+                foreach (var result in results)
+                {
+                    console.Out.Write($"{result}\n");
+                }
+
+                console.Out.Write($"\nFound {results.Count} package(s).\n");
                 return 0;
             }
             catch (Exception ex)
@@ -69,21 +77,18 @@ public class SyncCommand : Command
             }
         }
 
-        private async Task GenerateLockFileAsync(CancellationToken cancellationToken)
+        private async Task<List<string>> SearchPackagesAsync(string query, CancellationToken cancellationToken)
         {
             var msysRoot = _environment.GetMsys2Root();
             var pacman = System.IO.Path.Combine(msysRoot, "msys64", "usr", "bin", "pacman.exe");
             var config = await _configuration.LoadConfigurationAsync(cancellationToken);
-            var projectRoot = _configuration.GetProjectRoot();
-            var lockPath = System.IO.Path.Combine(projectRoot, "msys2.lock");
 
-            // Set environment variables
             System.Environment.SetEnvironmentVariable("MSYSTEM", config.MSystem);
 
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = pacman,
-                Arguments = "-Q --explicit",
+                Arguments = $"-Ss {query}",
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 StandardOutputEncoding = System.Text.Encoding.UTF8,
@@ -92,21 +97,19 @@ public class SyncCommand : Command
 
             using var process = System.Diagnostics.Process.Start(psi);
             if (process is null)
-                return;
+                return new List<string>();
 
-            var lines = new List<string>();
+            var results = new List<string>();
             while (await process.StandardOutput.ReadLineAsync(cancellationToken) is { } line)
             {
-                // Convert "package version" to "package=version"
-                var parts = line.Split(' ');
-                if (parts.Length >= 2)
+                if (!string.IsNullOrWhiteSpace(line))
                 {
-                    lines.Add($"{parts[0]}={parts[1]}");
+                    results.Add(line);
                 }
             }
 
             await process.WaitForExitAsync(cancellationToken);
-            await System.IO.File.WriteAllLinesAsync(lockPath, lines, cancellationToken);
+            return results;
         }
     }
 }

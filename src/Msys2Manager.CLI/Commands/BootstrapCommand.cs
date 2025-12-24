@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Msys2Manager.Core.Configuration;
 using Msys2Manager.Core.Services;
 using System.CommandLine;
 using System.CommandLine.Invocation;
@@ -7,14 +8,14 @@ namespace Msys2Manager.CLI.Commands;
 
 public class BootstrapCommand : Command
 {
-    public readonly Option<string> UrlOption;
+    public readonly Option<string?> UrlOption;
 
-    public BootstrapCommand() : base("bootstrap", "Initialize MSYS2 environment")
+    public BootstrapCommand() : base("bootstrap", "Install MSYS2")
     {
-        UrlOption = new Option<string>(
+        UrlOption = new Option<string?>(
             ["--url", "-u"],
-            () => "https://github.com/msys2/msys2-installer/releases/download/2024-01-13/",
-            "Base URL for MSYS2 installation"
+            getDefaultValue: () => null,
+            description: "Override the download URL (defaults to using config version)"
         );
 
         AddOption(UrlOption);
@@ -31,7 +32,7 @@ public class BootstrapCommand : Command
             _configuration = configuration;
         }
 
-        public string Url { get; set; } = "https://github.com/msys2/msys2-installer/releases/download/2024-01-13/";
+        public string? Url { get; set; }
 
         public int Invoke(InvocationContext context)
         {
@@ -44,40 +45,69 @@ public class BootstrapCommand : Command
 
             if (_environment.IsMsys2Installed())
             {
-                console.Out.Write("MSYS2 is already installed."
-);
+                console.Out.Write("MSYS2 is already installed.\n");
                 return 0;
             }
 
-            console.Out.Write("Installing MSYS2..."
-);
+            console.Out.Write("Installing MSYS2...\n");
 
-            var progress = new Progress<float>(p =>
+            var progress = new Progress<DownloadProgress>(p =>
             {
-                console.Out.Write($"\rProgress: {p * 100:F1}%");
+                var status = p.Percent < 0.5f ? "Downloading" : "Extracting";
+                if (p.Percent < 0.5f)
+                {
+                    // Download phase - show progress bar with speed and ETA
+                    console.Out.Write($"\r{status}: {p.GetProgressDisplay(25)}".PadRight(120));
+                }
+                else
+                {
+                    // Extract phase - show progress bar with file count and ETA
+                    var extractPercent = (p.Percent - 0.5f) * 2; // Convert 0.5-1.0 to 0-100%
+                    var barWidth = 25;
+                    var filled = (int)Math.Round(extractPercent * barWidth);
+                    var empty = barWidth - filled;
+                    var bar = $"[{new string('█', filled)}{new string('░', empty)}] {extractPercent * 100:F1}%";
+                    console.Out.Write($"\r{status}: {bar} | {p.DownloadedBytes}/{p.TotalBytes} files | ETA: {p.FormattedEta}".PadRight(120));
+                }
             });
 
             try
             {
-                await _environment.InstallMsys2Async(new Uri(Url), progress, context.GetCancellationToken());
-                console.Out.Write("\nMSYS2 installed successfully."
-);
+                // Use provided URL or construct from config
+                Uri downloadUrl;
+                Msys2Configuration? config = null;
 
-                var config = await _configuration.LoadConfigurationAsync(context.GetCancellationToken());
+                if (!string.IsNullOrEmpty(Url))
+                {
+                    downloadUrl = new Uri(Url);
+                }
+                else
+                {
+                    // Read from config to get BaseUrl and construct download URL
+                    config = await _configuration.LoadConfigurationAsync(context.GetCancellationToken());
+                    var baseUrl = new Uri(config.BaseUrl ?? "https://repo.msys2.org/distrib/x86_64/");
+                    var versionForUrl = config.Version?.Replace("-", "") ?? "20251213";
+                    // Use .tar.xz instead of .tar.zst since SharpCompress doesn't support zstd
+                    downloadUrl = new Uri(baseUrl, $"msys2-base-x86_64-{versionForUrl}.tar.xz");
+                }
+
+                await _environment.InstallMsys2Async(downloadUrl, progress, context.GetCancellationToken());
+                console.Out.Write("\nMSYS2 installed successfully.\n");
+
+                // Load config again for AutoUpdate check
+                config ??= await _configuration.LoadConfigurationAsync(context.GetCancellationToken());
 
                 if (config.AutoUpdate)
                 {
-                    console.Out.Write("Updating packages..."
-);
-                    await _environment.UpdateAllPackagesAsync(context.GetCancellationToken());
+                    console.Out.Write("Updating packages...\n");
+                    await _environment.UpgradeInstalledPackagesAsync(context.GetCancellationToken());
                 }
 
                 return 0;
             }
             catch (Exception ex)
             {
-                console.Error.Write($"\nError: {ex.Message}"
-);
+                console.Error.Write($"\nError: {ex.Message}\n");
                 return 1;
             }
         }

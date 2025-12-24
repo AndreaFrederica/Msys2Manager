@@ -5,34 +5,22 @@ using System.CommandLine.Invocation;
 
 namespace Msys2Manager.CLI.Commands;
 
-public class SyncCommand : Command
+public class UpgradeCommand : Command
 {
-    public readonly Option<bool> PruneOption;
-
-    public SyncCommand() : base("sync", "Sync installed packages with configuration")
+    public UpgradeCommand() : base("upgrade", "Upgrade installed packages (pacman -Su)")
     {
-        PruneOption = new Option<bool>(
-            ["--prune", "-p"],
-            "Remove packages not in configuration"
-        );
-
-        AddOption(PruneOption);
     }
 
     public new class Handler : ICommandHandler
     {
-        private readonly IPackageService _packages;
         private readonly IEnvironmentService _environment;
         private readonly IConfigurationService _configuration;
 
-        public Handler(IPackageService packages, IEnvironmentService environment, IConfigurationService configuration)
+        public Handler(IEnvironmentService environment, IConfigurationService configuration)
         {
-            _packages = packages;
             _environment = environment;
             _configuration = configuration;
         }
-
-        public bool Prune { get; set; }
 
         public int Invoke(InvocationContext context)
         {
@@ -49,16 +37,16 @@ public class SyncCommand : Command
                 return 1;
             }
 
-            console.Out.Write("Syncing packages...\n");
+            console.Out.Write("Upgrading installed packages...\n");
 
             try
             {
-                await _packages.SyncPackagesAsync(Prune, context.GetCancellationToken());
+                await _environment.UpgradeInstalledPackagesAsync(context.GetCancellationToken());
 
-                // Generate lock file after syncing
+                // Generate lock file after upgrading
                 await GenerateLockFileAsync(context.GetCancellationToken());
                 console.Out.Write("Generating msys2.lock...\n");
-                console.Out.Write("Sync complete.\n");
+                console.Out.Write("Upgrade complete.\n");
 
                 return 0;
             }
@@ -77,7 +65,6 @@ public class SyncCommand : Command
             var projectRoot = _configuration.GetProjectRoot();
             var lockPath = System.IO.Path.Combine(projectRoot, "msys2.lock");
 
-            // Set environment variables
             System.Environment.SetEnvironmentVariable("MSYSTEM", config.MSystem);
 
             var psi = new System.Diagnostics.ProcessStartInfo
@@ -97,7 +84,6 @@ public class SyncCommand : Command
             var lines = new List<string>();
             while (await process.StandardOutput.ReadLineAsync(cancellationToken) is { } line)
             {
-                // Convert "package version" to "package=version"
                 var parts = line.Split(' ');
                 if (parts.Length >= 2)
                 {

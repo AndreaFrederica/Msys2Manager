@@ -6,8 +6,8 @@ namespace Msys2Manager.Core.Services;
 public interface IPackageService
 {
     Task<IReadOnlyList<string>> GetInstalledPackagesAsync(CancellationToken cancellationToken = default);
-    Task InstallPackageAsync(string packageName, string? versionConstraint = null, CancellationToken cancellationToken = default);
-    Task UninstallPackageAsync(string packageName, CancellationToken cancellationToken = default);
+    Task<bool> InstallPackageAsync(string packageName, string? versionConstraint = null, CancellationToken cancellationToken = default);
+    Task<bool> UninstallPackageAsync(string packageName, CancellationToken cancellationToken = default);
     Task AddPackageToConfigAsync(string packageName, string? versionConstraint = null, CancellationToken cancellationToken = default);
     Task RemovePackageFromConfigAsync(string packageName, CancellationToken cancellationToken = default);
     Task SyncPackagesAsync(bool prune = false, CancellationToken cancellationToken = default);
@@ -28,12 +28,16 @@ public class PackageService : IPackageService
     {
         var result = new List<string>();
 
+        var msysRoot = _environmentService.GetMsys2Root();
+        var pacman = System.IO.Path.Combine(msysRoot, "msys64", "usr", "bin", "pacman.exe");
+
         var startInfo = new ProcessStartInfo
         {
-            FileName = _environmentService.GetMsysPath() + "/pacman.exe",
-            Arguments = "-Q",
+            FileName = pacman,
+            Arguments = "-Q --explicit",
             UseShellExecute = false,
             RedirectStandardOutput = true,
+            StandardOutputEncoding = System.Text.Encoding.UTF8,
             CreateNoWindow = true
         };
 
@@ -55,22 +59,111 @@ public class PackageService : IPackageService
         return result;
     }
 
-    public async Task InstallPackageAsync(string packageName, string? versionConstraint = null, CancellationToken cancellationToken = default)
+    public async Task<bool> InstallPackageAsync(string packageName, string? versionConstraint = null, CancellationToken cancellationToken = default)
     {
         var version = versionConstraint ?? "*";
-        var args = $"-S --needed {packageName}";
+        var pacmanArgs = $"-S --needed {packageName}";
 
         if (version != "*")
         {
-            args += $"={version}";
+            pacmanArgs += $"={version}";
         }
 
-        await _environmentService.ExecutePacmanAsync(args, cancellationToken);
+        var msysRoot = _environmentService.GetMsys2Root();
+        var pacman = System.IO.Path.Combine(msysRoot, "msys64", "usr", "bin", "pacman.exe");
+        var config = await _configurationService.LoadConfigurationAsync(cancellationToken);
+
+        // Set environment variables for this process (will be inherited by pacman)
+        System.Environment.SetEnvironmentVariable("MSYSTEM", config.MSystem);
+
+        // Install with direct output (user sees progress)
+        var psi = new ProcessStartInfo
+        {
+            FileName = pacman,
+            Arguments = $"--noconfirm {pacmanArgs}",
+            UseShellExecute = false
+        };
+
+        using var process = Process.Start(psi);
+        if (process is null)
+            return false;
+
+        process.WaitForExit();
+        var exitCode = process.ExitCode;
+
+        if (exitCode != 0)
+            return false;
+
+        // Verify installation by querying package (capture output, check exit code)
+        psi = new ProcessStartInfo
+        {
+            FileName = pacman,
+            Arguments = $"-Q {packageName}",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            StandardOutputEncoding = System.Text.Encoding.UTF8,
+            CreateNoWindow = true
+        };
+
+        using var verifyProcess = Process.Start(psi);
+        if (verifyProcess is null)
+            return false;
+
+        verifyProcess.WaitForExit();
+        return verifyProcess.ExitCode == 0;
     }
 
-    public async Task UninstallPackageAsync(string packageName, CancellationToken cancellationToken = default)
+    public async Task<bool> UninstallPackageAsync(string packageName, CancellationToken cancellationToken = default)
     {
-        await _environmentService.ExecutePacmanAsync($"-R {packageName}", cancellationToken);
+        var msysRoot = _environmentService.GetMsys2Root();
+        var pacman = System.IO.Path.Combine(msysRoot, "msys64", "usr", "bin", "pacman.exe");
+        var config = await _configurationService.LoadConfigurationAsync(cancellationToken);
+
+        // Set environment variables for this process (will be inherited by pacman)
+        System.Environment.SetEnvironmentVariable("MSYSTEM", config.MSystem);
+
+        Console.WriteLine($"Removing {packageName}...");
+
+        // Remove with direct output (user sees progress)
+        var psi = new ProcessStartInfo
+        {
+            FileName = pacman,
+            Arguments = $"--noconfirm -R {packageName}",
+            UseShellExecute = false
+        };
+
+        using var process = Process.Start(psi);
+        if (process is null)
+            return false;
+
+        process.WaitForExit();
+        var exitCode = process.ExitCode;
+
+        if (exitCode != 0)
+        {
+            Console.WriteLine($"Failed to remove {packageName} (exit code: {exitCode})");
+            return false;
+        }
+
+        // Verify package is removed
+        psi = new ProcessStartInfo
+        {
+            FileName = pacman,
+            Arguments = $"-Q {packageName}",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            StandardOutputEncoding = System.Text.Encoding.UTF8,
+            CreateNoWindow = true
+        };
+
+        using var verifyProcess = Process.Start(psi);
+        if (verifyProcess is null)
+            return true; // If we can't verify, assume success
+
+        verifyProcess.WaitForExit();
+        var verified = verifyProcess.ExitCode != 0; // Q should fail if package is removed
+        Console.WriteLine($"Verified removal of {packageName}: {verified}");
+        return verified;
     }
 
     public async Task AddPackageToConfigAsync(string packageName, string? versionConstraint = null, CancellationToken cancellationToken = default)
@@ -124,7 +217,12 @@ public class PackageService : IPackageService
         {
             var version = config.Packages[package];
             Console.WriteLine($"Installing {package}={version}...");
-            await InstallPackageAsync(package, version, cancellationToken);
+            var success = await InstallPackageAsync(package, version, cancellationToken);
+            if (!success)
+            {
+                Console.WriteLine($"Failed to install {package}. Aborting.");
+                return;
+            }
         }
 
         if (prune)
@@ -132,7 +230,12 @@ public class PackageService : IPackageService
             foreach (var package in toRemove)
             {
                 Console.WriteLine($"Removing {package}...");
-                await UninstallPackageAsync(package, cancellationToken);
+                var success = await UninstallPackageAsync(package, cancellationToken);
+                if (!success)
+                {
+                    Console.WriteLine($"Failed to remove {package}. Aborting.");
+                    return;
+                }
             }
         }
     }

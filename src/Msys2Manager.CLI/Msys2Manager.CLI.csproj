@@ -7,15 +7,8 @@
     <ToolCommandName>m2m</ToolCommandName>
     <PackageId>Msys2Manager.CLI</PackageId>
 
-    <!-- AOT / Native AOT Publishing -->
+    <!-- Native AOT Publishing -->
     <PublishAot>true</PublishAot>
-    <SelfContained>true</SelfContained>
-    <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
-    <IlcFoldIdenticalMethodBodies>true</IlcFoldIdenticalMethodBodies>
-    <InvariantGlobalization>true</InvariantGlobalization>
-
-    <!-- Strip symbols from native binary for smaller size -->
-    <TrimmerSingleWarn>false</TrimmerSingleWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -23,7 +16,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
+    <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.1" />
+    <PackageReference Include="runtime.win-x64.Microsoft.DotNet.ILCompiler" Version="10.0.1" />
+    <PackageReference Include="SharpCompress" Version="0.42.1" />
+    <PackageReference Include="System.CommandLine" Version="2.0.0-beta4" />
   </ItemGroup>
 
 </Project>

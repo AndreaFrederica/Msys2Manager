@@ -45,6 +45,8 @@ public class ConfigurationService : IConfigurationService
         {
             if (msys2.TryGetValue("msystem", out var msystem))
                 result.MSystem = msystem.ToString() ?? "UCRT64";
+            if (msys2.TryGetValue("version", out var version))
+                result.Version = version.ToString();
             if (msys2.TryGetValue("base_url", out var baseUrl))
                 result.BaseUrl = baseUrl.ToString();
             if (msys2.TryGetValue("mirror", out var mirror))
@@ -95,6 +97,7 @@ public class ConfigurationService : IConfigurationService
             ["msys2"] = new TomlTable
             {
                 ["msystem"] = configuration.MSystem,
+                ["version"] = configuration.Version ?? string.Empty,
                 ["base_url"] = configuration.BaseUrl ?? string.Empty,
                 ["mirror"] = configuration.Mirror ?? string.Empty,
                 ["auto_update"] = configuration.AutoUpdate

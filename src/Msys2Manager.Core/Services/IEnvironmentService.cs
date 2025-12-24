@@ -2,8 +2,71 @@ using System.Diagnostics;
 using System.IO.Abstractions;
 using SharpCompress.Archives;
 using SharpCompress.Common;
+using SharpCompress.Readers;
 
 namespace Msys2Manager.Core.Services;
+
+/// <summary>
+/// Download progress information
+/// </summary>
+public class DownloadProgress
+{
+    public float Percent { get; set; }
+    public long DownloadedBytes { get; set; }
+    public long TotalBytes { get; set; }
+    public double SpeedBytesPerSecond { get; set; }
+    public TimeSpan? Eta { get; set; }
+    public bool IsCached { get; set; }
+
+    public string FormattedSpeed => IsCached ? "Cached" : FormatBytes(SpeedBytesPerSecond) + "/s";
+    public string FormattedEta => Eta.HasValue ? FormatTime(Eta.Value) : "--:--";
+    public string FormattedProgress => $"{FormatBytes(DownloadedBytes)} / {FormatBytes(TotalBytes)}";
+    public string FormattedPercent => $"{Percent * 100:F1}%";
+
+    /// <summary>
+    /// Get a visual progress bar (e.g., [████████░░░░░░░░░] 40%)
+    /// </summary>
+    /// <param name="width">Total width of the progress bar in characters (default: 30)</param>
+    /// <returns>Visual progress bar string</returns>
+    public string GetProgressBar(int width = 30)
+    {
+        var filled = (int)Math.Round(Percent * width);
+        var empty = width - filled;
+        return $"[{new string('█', filled)}{new string('░', empty)}]";
+    }
+
+    /// <summary>
+    /// Get a complete progress display string
+    /// </summary>
+    /// <param name="barWidth">Width of the progress bar (default: 20)</param>
+    /// <returns>Complete progress display string</returns>
+    public string GetProgressDisplay(int barWidth = 20)
+    {
+        return $"{GetProgressBar(barWidth)} {FormattedPercent} | {FormattedProgress} | {FormattedSpeed} | ETA: {FormattedEta}";
+    }
+
+    private static string FormatBytes(double bytes)
+    {
+        string[] sizes = { "B", "KB", "MB", "GB", "TB" };
+        int order = 0;
+        double size = bytes;
+        while (size >= 1024 && order < sizes.Length - 1)
+        {
+            order++;
+            size /= 1024;
+        }
+        return $"{size:0.##} {sizes[order]}";
+    }
+
+    private static string FormatTime(TimeSpan ts)
+    {
+        if (ts.TotalSeconds < 60)
+            return $"{(int)ts.TotalSeconds}s";
+        if (ts.TotalMinutes < 60)
+            return $"{(int)ts.TotalMinutes}m {(int)ts.Seconds}s";
+        return $"{(int)ts.TotalHours}h {(int)ts.Minutes}m";
+    }
+}
 
 public interface IEnvironmentService
 {
@@ -11,11 +74,12 @@ public interface IEnvironmentService
     string GetMsysPath();
     string GetTmpPath();
     bool IsMsys2Installed();
-    Task<bool> InstallMsys2Async(Uri baseUrl, IProgress<float>? progress = null, CancellationToken cancellationToken = default);
+    Task<bool> InstallMsys2Async(Uri baseUrl, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default);
     Task RemoveMsys2Async(bool force = false, CancellationToken cancellationToken = default);
-    Task<int> ExecuteCommandAsync(string command, string? workingDirectory = null, CancellationToken cancellationToken = default);
-    Task<int> ExecutePacmanAsync(string args, CancellationToken cancellationToken = default);
-    Task UpdateAllPackagesAsync(CancellationToken cancellationToken = default);
+    Task<int> ExecuteCommandAsync(string command, string? workingDirectory = null, bool redirectOutput = false, CancellationToken cancellationToken = default);
+    Task<int> ExecutePacmanAsync(string args, bool redirectOutput = false, CancellationToken cancellationToken = default);
+    Task UpdatePackageListAsync(CancellationToken cancellationToken = default);
+    Task UpgradeInstalledPackagesAsync(CancellationToken cancellationToken = default);
 }
 
 public class EnvironmentService : IEnvironmentService
@@ -62,7 +126,7 @@ public class EnvironmentService : IEnvironmentService
         return _fileSystem.Directory.Exists(msys64Path);
     }
 
-    public async Task<bool> InstallMsys2Async(Uri baseUrl, IProgress<float>? progress = null, CancellationToken cancellationToken = default)
+    public async Task<bool> InstallMsys2Async(Uri baseUrl, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default)
     {
         var msysRoot = GetMsys2Root();
         var tmpPath = GetTmpPath();
@@ -70,8 +134,8 @@ public class EnvironmentService : IEnvironmentService
         _fileSystem.Directory.CreateDirectory(tmpPath);
 
         // 支持 base_url 两种格式:
-        // 1. 完整文件 URL: "https://repo.msys2.org/distrib/x86_64/msys2-base-x86_64-20251213.tar.zst"
-        // 2. 目录 URL: "https://repo.msys2.org/distrib/x86_64/20251213/"
+        // 1. 完整文件 URL: "https://repo.msys2.org/distrib/x86_64/msys2-base-x86_64-20251213.tar.xz"
+        // 2. 目录 URL: "https://repo.msys2.org/distrib/x86_64/"
         Uri downloadUrl;
         if (baseUrl.AbsolutePath.EndsWith(".tar.zst") || baseUrl.AbsolutePath.EndsWith(".tar.xz"))
         {
@@ -79,25 +143,25 @@ public class EnvironmentService : IEnvironmentService
         }
         else
         {
-            // Extract version from baseUrl path (e.g., "20251213" from ".../distrib/x86_64/20251213/")
-            var pathSegments = baseUrl.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
-            var version = pathSegments.Length > 0 ? pathSegments[^1] : "20251213";
-            // Prefer .tar.zst as it's smaller (zstd compression)
-            downloadUrl = new Uri(baseUrl, $"msys2-base-x86_64-{version}.tar.zst");
+            // Get version from config to construct filename
+            var config = await _configurationService.LoadConfigurationAsync(cancellationToken);
+            var versionForUrl = config.Version?.Replace("-", "") ?? "20251213";
+            // Use .tar.xz since SharpCompress doesn't support zstd compression
+            downloadUrl = new Uri(baseUrl, $"msys2-base-x86_64-{versionForUrl}.tar.xz");
         }
 
         var fileName = System.IO.Path.GetFileName(downloadUrl.LocalPath);
         var downloadPath = _fileSystem.Path.Combine(tmpPath, fileName);
 
-        progress?.Report(0f);
+        progress?.Report(new DownloadProgress { Percent = 0f });
 
         await DownloadFileAsync(downloadUrl, downloadPath, progress, cancellationToken);
 
-        progress?.Report(0.5f);
+        progress?.Report(new DownloadProgress { Percent = 0.5f });
 
         await ExtractArchiveAsync(downloadPath, msysRoot, progress, cancellationToken);
 
-        progress?.Report(1f);
+        progress?.Report(new DownloadProgress { Percent = 1f });
 
         return true;
     }
@@ -124,7 +188,7 @@ public class EnvironmentService : IEnvironmentService
         return Task.CompletedTask;
     }
 
-    public async Task<int> ExecuteCommandAsync(string command, string? workingDirectory = null, CancellationToken cancellationToken = default)
+    public async Task<int> ExecuteCommandAsync(string command, string? workingDirectory = null, bool redirectOutput = false, CancellationToken cancellationToken = default)
     {
         var msysRoot = GetMsys2Root();
         var msysPath = _fileSystem.Path.Combine(msysRoot, "msys64", "usr", "bin", "bash.exe");
@@ -132,49 +196,107 @@ public class EnvironmentService : IEnvironmentService
 
         workingDirectory ??= _configurationService.GetProjectRoot();
 
-        var msysWorkDir = await ConvertToMsysPathAsync(workingDirectory, cancellationToken);
-        var args = $"-l -c \"cd {msysWorkDir} && {command}\"";
+        // Set environment variables in current process so bash inherits them
+        Environment.SetEnvironmentVariable("MSYSTEM", config.MSystem);
+        Environment.SetEnvironmentVariable("CHERE_INVOKING", "1");
 
-        var psi = new ProcessStartInfo
+        // Use cygpath inline to convert Windows path to MSYS2 path
+        var args = $"-l -c \"cd $(cygpath -u '{workingDirectory}') && {command}\"";
+
+        if (redirectOutput)
         {
-            FileName = msysPath,
-            Arguments = args,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-            Environment =
+            // Capture output programmatically
+            var psi = new ProcessStartInfo
             {
-                ["MSYSTEM"] = config.MSystem,
-                ["CHERE_INVOKING"] = "1"
+                FileName = msysPath,
+                Arguments = args,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = System.Text.Encoding.UTF8,
+                StandardErrorEncoding = System.Text.Encoding.UTF8,
+                CreateNoWindow = true
+            };
+
+            using var process = Process.Start(psi);
+            if (process is null)
+            {
+                return -1;
             }
-        };
 
-        using var process = Process.Start(psi);
-        if (process is null)
-        {
-            return -1;
+            // Consume output asynchronously to avoid deadlock
+            var outputTask = Task.Run(() =>
+            {
+                var sb = new System.Text.StringBuilder();
+                while (!process.HasExited && !cancellationToken.IsCancellationRequested)
+                {
+                    var line = process.StandardOutput.ReadLine();
+                    if (line == null) break;
+                    // Output is consumed but not used (caller can extend to capture if needed)
+                }
+                return Task.CompletedTask;
+            }, cancellationToken);
+
+            var errorTask = Task.Run(() =>
+            {
+                while (!process.HasExited && !cancellationToken.IsCancellationRequested)
+                {
+                    var line = process.StandardError.ReadLine();
+                    if (line == null) break;
+                    // Stderr is consumed but not used
+                }
+                return Task.CompletedTask;
+            }, cancellationToken);
+
+            await Task.WhenAll(outputTask, errorTask);
+            await process.WaitForExitAsync(cancellationToken);
+            return process.ExitCode;
         }
+        else
+        {
+            // Let bash inherit the console (like PowerShell's & operator)
+            var psi = new ProcessStartInfo
+            {
+                FileName = msysPath,
+                Arguments = args,
+                UseShellExecute = false
+            };
 
-        await process.WaitForExitAsync(cancellationToken);
-        return process.ExitCode;
+            using var process = Process.Start(psi);
+            if (process is null)
+            {
+                return -1;
+            }
+
+            await process.WaitForExitAsync(cancellationToken);
+            return process.ExitCode;
+        }
     }
 
-    public async Task<int> ExecutePacmanAsync(string args, CancellationToken cancellationToken = default)
+    public async Task<int> ExecutePacmanAsync(string args, bool redirectOutput = false, CancellationToken cancellationToken = default)
     {
-        return await ExecuteCommandAsync($"pacman --noconfirm {args}", cancellationToken: cancellationToken);
+        return await ExecuteCommandAsync($"pacman --noconfirm {args}", redirectOutput: redirectOutput, cancellationToken: cancellationToken);
     }
 
-    public async Task UpdateAllPackagesAsync(CancellationToken cancellationToken = default)
+    public async Task UpdatePackageListAsync(CancellationToken cancellationToken = default)
     {
-        await ExecutePacmanAsync("-Syu", cancellationToken);
-        await ExecutePacmanAsync("-Su", cancellationToken);
+        await ExecutePacmanAsync("-Sy", redirectOutput: false, cancellationToken);
+    }
+
+    public async Task UpgradeInstalledPackagesAsync(CancellationToken cancellationToken = default)
+    {
+        await ExecutePacmanAsync("-Su", redirectOutput: false, cancellationToken);
     }
 
     private async Task<string> ConvertToMsysPathAsync(string windowsPath, CancellationToken cancellationToken)
     {
         var msysRoot = GetMsys2Root();
         var msysBash = _fileSystem.Path.Combine(msysRoot, "msys64", "usr", "bin", "bash.exe");
+        var config = await _configurationService.LoadConfigurationAsync(cancellationToken);
+
+        // Set environment variables for this process so cygpath works correctly
+        Environment.SetEnvironmentVariable("MSYSTEM", config.MSystem);
+        Environment.SetEnvironmentVariable("CHERE_INVOKING", "1");
 
         using var process = Process.Start(new ProcessStartInfo
         {
@@ -193,9 +315,45 @@ public class EnvironmentService : IEnvironmentService
         return msysPath.Trim();
     }
 
-    private async Task DownloadFileAsync(Uri uri, string destination, IProgress<float>? progress, CancellationToken cancellationToken)
+    private async Task DownloadFileAsync(Uri uri, string destination, IProgress<DownloadProgress>? progress, CancellationToken cancellationToken)
     {
         using var client = new HttpClient();
+
+        // First check if we have a cached file
+        if (_fileSystem.File.Exists(destination))
+        {
+            try
+            {
+                // Check the expected file size via HEAD request
+                using var headResponse = await client.SendAsync(new HttpRequestMessage(HttpMethod.Head, uri), HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                if (headResponse.IsSuccessStatusCode)
+                {
+                    var expectedSize = headResponse.Content.Headers.ContentLength ?? 0;
+                    var cachedSize = _fileSystem.FileInfo.New(destination).Length;
+
+                    if (expectedSize > 0 && cachedSize == expectedSize)
+                    {
+                        // File is complete, use cached version
+                        progress?.Report(new DownloadProgress
+                        {
+                            Percent = 0.5f,
+                            DownloadedBytes = cachedSize,
+                            TotalBytes = expectedSize,
+                            SpeedBytesPerSecond = 0,
+                            Eta = TimeSpan.Zero,
+                            IsCached = true
+                        });
+                        return;
+                    }
+                }
+            }
+            catch
+            {
+                // If check fails, proceed with download
+            }
+        }
+
+        // Download the file
         using var response = await client.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
 
@@ -207,49 +365,114 @@ public class EnvironmentService : IEnvironmentService
 
         var totalRead = 0L;
         var read = 0;
+        var startTime = DateTime.UtcNow;
+        var lastReportTime = startTime;
 
         while ((read = await stream.ReadAsync(buffer, cancellationToken)) > 0)
         {
             await fileStream.WriteAsync(buffer, 0, read, cancellationToken);
             totalRead += read;
 
-            if (totalBytes > 0 && progress is not null)
+            var now = DateTime.UtcNow;
+            // Update progress every 0.5 seconds
+            if ((now - lastReportTime).TotalMilliseconds >= 500 && progress is not null)
             {
-                var percent = (float)totalRead / totalBytes * 0.5f; // Download is 50% of total
-                progress.Report(percent);
+                var elapsed = (now - startTime).TotalSeconds;
+                var speedBytesPerSecond = elapsed > 0 ? totalRead / elapsed : 0;
+                var remainingBytes = totalBytes - totalRead;
+                var eta = speedBytesPerSecond > 0 ? TimeSpan.FromSeconds(remainingBytes / speedBytesPerSecond) : (TimeSpan?)null;
+
+                progress.Report(new DownloadProgress
+                {
+                    Percent = (float)totalRead / totalBytes * 0.5f, // Download is 50% of total
+                    DownloadedBytes = totalRead,
+                    TotalBytes = totalBytes,
+                    SpeedBytesPerSecond = speedBytesPerSecond,
+                    Eta = eta
+                });
+                lastReportTime = now;
             }
+        }
+
+        // Final progress report
+        if (progress is not null)
+        {
+            var elapsed = (DateTime.UtcNow - startTime).TotalSeconds;
+            var speedBytesPerSecond = elapsed > 0 ? totalRead / elapsed : 0;
+            progress.Report(new DownloadProgress
+            {
+                Percent = 0.5f,
+                DownloadedBytes = totalRead,
+                TotalBytes = totalBytes,
+                SpeedBytesPerSecond = speedBytesPerSecond,
+                Eta = TimeSpan.Zero
+            });
         }
     }
 
-    private async Task ExtractArchiveAsync(string archivePath, string destination, IProgress<float>? progress, CancellationToken cancellationToken)
+    private async Task ExtractArchiveAsync(string archivePath, string destination, IProgress<DownloadProgress>? progress, CancellationToken cancellationToken)
     {
-        // SharpCompress supports .tar.zst (zstd), .tar.xz, .tar.gz, etc. directly
+        // SharpCompress supports .tar.xz via ReaderFactory (not ArchiveFactory)
+        // .xz is a compression stream, not an archive format
         await Task.Run(() =>
         {
             _fileSystem.Directory.CreateDirectory(destination);
 
-            using var archive = ArchiveFactory.Open(archivePath);
-            var entries = archive.Entries.Where(x => !x.IsDirectory).ToArray();
-            var totalEntries = entries.Length;
-            var extracted = 0;
-
-            foreach (var entry in entries)
+            // First pass: count total entries (open new stream)
+            var totalEntries = 0;
+            using (var stream1 = _fileSystem.File.OpenRead(archivePath))
+            using (var reader1 = ReaderFactory.Open(stream1))
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                entry.WriteToDirectory(destination, new ExtractionOptions
+                while (reader1.MoveToNextEntry())
                 {
-                    ExtractFullPath = true,
-                    Overwrite = true
-                });
+                    if (!reader1.Entry.IsDirectory)
+                        totalEntries++;
+                }
+            }
 
-                extracted++;
+            // Second pass: extract (open new stream)
+            using (var stream2 = _fileSystem.File.OpenRead(archivePath))
+            using (var reader2 = ReaderFactory.Open(stream2))
+            {
+                var extracted = 0;
+                var startTime = DateTime.UtcNow;
+                var lastReportTime = startTime;
 
-                // Report progress: 0.5 to 1.0 (50% to 100%)
-                if (progress is not null && totalEntries > 0)
+                while (reader2.MoveToNextEntry())
                 {
-                    var percent = 0.5f + (float)extracted / totalEntries * 0.5f;
-                    progress.Report(percent);
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    if (!reader2.Entry.IsDirectory)
+                    {
+                        reader2.WriteEntryToDirectory(destination, new ExtractionOptions
+                        {
+                            ExtractFullPath = true,
+                            Overwrite = true
+                        });
+
+                        extracted++;
+
+                        // Report progress: 0.5 to 1.0 (50% to 100%)
+                        var now = DateTime.UtcNow;
+                        if ((now - lastReportTime).TotalMilliseconds >= 500 && progress is not null && totalEntries > 0)
+                        {
+                            var percent = 0.5f + (float)extracted / totalEntries * 0.5f;
+                            var elapsed = (now - startTime).TotalSeconds;
+                            var speedPerSecond = elapsed > 0 ? extracted / elapsed : 0;
+                            var remainingEntries = totalEntries - extracted;
+                            var eta = speedPerSecond > 0 ? TimeSpan.FromSeconds(remainingEntries / speedPerSecond) : (TimeSpan?)null;
+
+                            progress.Report(new DownloadProgress
+                            {
+                                Percent = percent,
+                                DownloadedBytes = extracted,
+                                TotalBytes = totalEntries,
+                                SpeedBytesPerSecond = speedPerSecond,
+                                Eta = eta
+                            });
+                            lastReportTime = now;
+                        }
+                    }
                 }
             }
         }, cancellationToken);

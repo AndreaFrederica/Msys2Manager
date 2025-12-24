@@ -270,11 +270,10 @@ public static class CommandExtensions
             }
 
             config.MSystem = selectedMsystem;
+            config.Version = msys2Version;  // Store version in YYYY-MM-DD format
             config.Mirror = mirror;
-            // Use repo.msys2.org as the base URL
-            // Version is in YYYY-MM-DD format, need to convert to YYYYMMDD for download
-            var versionForDownload = msys2Version.Replace("-", "");
-            config.BaseUrl = $"https://repo.msys2.org/distrib/x86_64/{versionForDownload}/";
+            // Base URL is the directory containing MSYS2 files
+            config.BaseUrl = "https://repo.msys2.org/distrib/x86_64/";
             config.AutoUpdate = true;
 
             await confService.SaveConfigurationAsync(config);
@@ -302,7 +301,7 @@ public static class CommandExtensions
 
         // Bootstrap command
         var bootstrap = new BootstrapCommand();
-        bootstrap.SetHandler<string>(async (url) =>
+        bootstrap.SetHandler<string?>(async (url) =>
         {
             var env = services.GetRequiredService<Msys2Manager.Core.Services.IEnvironmentService>();
             var conf = services.GetRequiredService<Msys2Manager.Core.Services.IConfigurationService>();
@@ -311,18 +310,92 @@ public static class CommandExtensions
             {
                 Console.Out.Write("MSYS2 is already installed.\n");
                 Environment.ExitCode = 0;
+                return;
             }
 
             Console.Out.Write("Installing MSYS2...\n");
-            await env.InstallMsys2Async(new Uri(url), new Progress<float>(p => Console.Out.Write($"\rProgress: {p * 100:F1}%")));
+
+            // Use provided URL or construct from config
+            Uri downloadUrl;
+            if (!string.IsNullOrEmpty(url))
+            {
+                downloadUrl = new Uri(url);
+            }
+            else
+            {
+                var msys2Config = await conf.LoadConfigurationAsync();
+                var baseUrlStr = msys2Config.BaseUrl ?? "https://repo.msys2.org/distrib/x86_64/";
+                var baseUrl = new Uri(baseUrlStr);
+                var versionForUrl = msys2Config.Version?.Replace("-", "") ?? "20251213";
+                // Use .tar.xz instead of .tar.zst since SharpCompress doesn't support zstd
+                downloadUrl = new Uri(baseUrl, $"msys2-base-x86_64-{versionForUrl}.tar.xz");
+            }
+
+            var lastProgress = new Msys2Manager.Core.Services.DownloadProgress();
+            await env.InstallMsys2Async(downloadUrl, new Progress<Msys2Manager.Core.Services.DownloadProgress>(p =>
+            {
+                var status = p.Percent < 0.5f ? "Downloading" : "Extracting";
+                if (p.Percent < 0.5f)
+                {
+                    // Download phase - show progress bar with speed and ETA
+                    Console.Out.Write($"\r{status}: {p.GetProgressDisplay(25)}".PadRight(120));
+                }
+                else
+                {
+                    // Extract phase - show progress bar with file count and ETA
+                    var extractPercent = (p.Percent - 0.5f) * 2; // Convert 0.5-1.0 to 0-100%
+                    var barWidth = 25;
+                    var filled = (int)Math.Round(extractPercent * barWidth);
+                    var empty = barWidth - filled;
+                    var bar = $"[{new string('█', filled)}{new string('░', empty)}] {extractPercent * 100:F1}%";
+                    Console.Out.Write($"\r{status}: {bar} | {p.DownloadedBytes}/{p.TotalBytes} files | ETA: {p.FormattedEta}".PadRight(120));
+                }
+                lastProgress = p;
+            }));
             Console.Out.Write("\nMSYS2 installed successfully.\n");
 
             var config = await conf.LoadConfigurationAsync();
             if (config.AutoUpdate)
             {
                 Console.Out.Write("Updating packages...\n");
-                await env.UpdateAllPackagesAsync();
+                await env.UpgradeInstalledPackagesAsync();
             }
+
+            // Generate lock file after bootstrap
+            var msysRoot = env.GetMsys2Root();
+            var pacman = System.IO.Path.Combine(msysRoot, "msys64", "usr", "bin", "pacman.exe");
+            var msysConfig = await conf.LoadConfigurationAsync();
+            var projectRoot = conf.GetProjectRoot();
+            var lockPath = System.IO.Path.Combine(projectRoot, "msys2.lock");
+
+            System.Environment.SetEnvironmentVariable("MSYSTEM", msysConfig.MSystem);
+
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = pacman,
+                Arguments = "-Q --explicit",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                StandardOutputEncoding = System.Text.Encoding.UTF8,
+                CreateNoWindow = true
+            };
+
+            using var process = System.Diagnostics.Process.Start(psi);
+            if (process != null)
+            {
+                var lines = new List<string>();
+                while (await process.StandardOutput.ReadLineAsync() is { } line)
+                {
+                    var parts = line.Split(' ');
+                    if (parts.Length >= 2)
+                    {
+                        lines.Add($"{parts[0]}={parts[1]}");
+                    }
+                }
+                await process.WaitForExitAsync();
+                await System.IO.File.WriteAllLinesAsync(lockPath, lines);
+            }
+            Console.Out.Write("Generating msys2.lock...\n");
 
             Environment.ExitCode = 0;
         },
@@ -331,87 +404,104 @@ public static class CommandExtensions
 
         // Update command
         var update = new UpdateCommand();
-        update.SetHandler(async () =>
+        update.SetHandler(async (ctx) =>
         {
             var env = services.GetRequiredService<Msys2Manager.Core.Services.IEnvironmentService>();
-            var conf = services.GetRequiredService<Msys2Manager.Core.Services.IConfigurationService>();
-
-            if (!env.IsMsys2Installed())
-            {
-                Console.Error.Write("MSYS2 is not installed. Run 'm2m bootstrap' first.\n");
-                Environment.ExitCode = 1;
-            }
-
-            Console.Out.Write("Updating MSYS2 packages...\n");
-            await env.UpdateAllPackagesAsync();
-
-            var lockFile = await conf.LoadLockFileAsync();
-            await conf.SaveLockFileAsync(lockFile);
-
-            Console.Out.Write("Update complete.\n");
-            Environment.ExitCode = 0;
+            var handler = new UpdateCommand.Handler(env);
+            ctx.ExitCode = await handler.InvokeAsync(ctx);
         });
         rootCommand.AddCommand(update);
 
+        // Upgrade command
+        var upgrade = new UpgradeCommand();
+        upgrade.SetHandler(async (ctx) =>
+        {
+            var env = services.GetRequiredService<Msys2Manager.Core.Services.IEnvironmentService>();
+            var config = services.GetRequiredService<Msys2Manager.Core.Services.IConfigurationService>();
+            var handler = new UpgradeCommand.Handler(env, config);
+            ctx.ExitCode = await handler.InvokeAsync(ctx);
+        });
+        rootCommand.AddCommand(upgrade);
+
         // Sync command
         var sync = new SyncCommand();
-        sync.SetHandler<bool>(async (prune) =>
+        sync.SetHandler(async (ctx) =>
         {
-            var packages = services.GetRequiredService<Msys2Manager.Core.Services.IPackageService>();
+            var pkgService = services.GetRequiredService<Msys2Manager.Core.Services.IPackageService>();
             var env = services.GetRequiredService<Msys2Manager.Core.Services.IEnvironmentService>();
+            var config = services.GetRequiredService<Msys2Manager.Core.Services.IConfigurationService>();
 
-            if (!env.IsMsys2Installed())
+            var handler = new SyncCommand.Handler(pkgService, env, config)
             {
-                Console.Error.Write("MSYS2 is not installed. Run 'm2m bootstrap' first.\n");
-                Environment.ExitCode = 1;
-            }
-
-            Console.Out.Write("Syncing packages...\n");
-            await packages.SyncPackagesAsync(prune);
-            Console.Out.Write("Sync complete.\n");
-            Environment.ExitCode = 0;
-        },
-        sync.PruneOption);
+                Prune = ctx.ParseResult.GetValueForOption(sync.PruneOption)
+            };
+            ctx.ExitCode = await handler.InvokeAsync(ctx);
+        });
         rootCommand.AddCommand(sync);
 
         // Add command
         var add = new AddCommand();
-        add.SetHandler<string[], string?>(async (packages, version) =>
+        add.SetHandler(async (ctx) =>
         {
             var pkgService = services.GetRequiredService<Msys2Manager.Core.Services.IPackageService>();
             var env = services.GetRequiredService<Msys2Manager.Core.Services.IEnvironmentService>();
+            var config = services.GetRequiredService<Msys2Manager.Core.Services.IConfigurationService>();
 
-            if (!env.IsMsys2Installed())
+            var handler = new AddCommand.Handler(pkgService, env, config)
             {
-                Console.Error.Write("MSYS2 is not installed. Run 'm2m bootstrap' first.\n");
-                Environment.ExitCode = 1;
-            }
-
-            foreach (var package in packages)
-            {
-                await pkgService.AddPackageToConfigAsync(package, version);
-                await pkgService.InstallPackageAsync(package, version);
-            }
-            Environment.ExitCode = 0;
-        },
-        add.PackagesArgument,
-        add.VersionOption);
+                Packages = ctx.ParseResult.GetValueForArgument(add.PackagesArgument) ?? Array.Empty<string>(),
+                Version = ctx.ParseResult.GetValueForOption(add.VersionOption)
+            };
+            ctx.ExitCode = await handler.InvokeAsync(ctx);
+        });
         rootCommand.AddCommand(add);
 
         // Remove command
         var remove = new RemoveCommand();
-        remove.SetHandler<string[]>(async (packages) =>
+        remove.SetHandler(async (ctx) =>
         {
             var pkgService = services.GetRequiredService<Msys2Manager.Core.Services.IPackageService>();
+            var env = services.GetRequiredService<Msys2Manager.Core.Services.IEnvironmentService>();
+            var config = services.GetRequiredService<Msys2Manager.Core.Services.IConfigurationService>();
 
-            foreach (var package in packages)
+            var handler = new RemoveCommand.Handler(pkgService, env, config)
             {
-                await pkgService.RemovePackageFromConfigAsync(package);
-            }
-            Environment.ExitCode = 0;
-        },
-        remove.PackagesArgument);
+                Packages = ctx.ParseResult.GetValueForArgument(remove.PackagesArgument) ?? Array.Empty<string>()
+            };
+            ctx.ExitCode = await handler.InvokeAsync(ctx);
+        });
         rootCommand.AddCommand(remove);
+
+        // List command
+        var list = new ListCommand();
+        list.SetHandler(async (ctx) =>
+        {
+            var pkgService = services.GetRequiredService<Msys2Manager.Core.Services.IPackageService>();
+            var config = services.GetRequiredService<Msys2Manager.Core.Services.IConfigurationService>();
+
+            var handler = new ListCommand.Handler(pkgService, config)
+            {
+                Explicit = ctx.ParseResult.GetValueForOption(list.ExplicitOption),
+                LockFile = ctx.ParseResult.GetValueForOption(list.LockFileOption)
+            };
+            ctx.ExitCode = await handler.InvokeAsync(ctx);
+        });
+        rootCommand.AddCommand(list);
+
+        // Search command
+        var search = new SearchCommand();
+        search.SetHandler(async (ctx) =>
+        {
+            var env = services.GetRequiredService<Msys2Manager.Core.Services.IEnvironmentService>();
+            var config = services.GetRequiredService<Msys2Manager.Core.Services.IConfigurationService>();
+
+            var handler = new SearchCommand.Handler(env, config)
+            {
+                Query = ctx.ParseResult.GetValueForArgument(search.QueryArgument) ?? Array.Empty<string>()
+            };
+            ctx.ExitCode = await handler.InvokeAsync(ctx);
+        });
+        rootCommand.AddCommand(search);
 
         // Run command
         var run = new RunCommand();
@@ -476,23 +566,34 @@ public static class CommandExtensions
             var config = conf.LoadConfigurationAsync().GetAwaiter().GetResult();
             var projectRoot = conf.GetProjectRoot();
 
-            var msysBat = System.IO.Path.Combine(msysRoot, "msys64", "msys2.exe");
+            // Use bash.exe directly instead of msys2.exe
+            var bash = System.IO.Path.Combine(msysRoot, "msys64", "usr", "bin", "bash.exe");
 
+            // Set environment variables for this process (will be inherited by bash)
+            Environment.SetEnvironmentVariable("MSYSTEM", config.MSystem);
+            Environment.SetEnvironmentVariable("CHERE_INVOKING", "1");
+
+            // Start bash in the current console with the correct working directory
+            // Use cygpath to convert Windows path to MSYS2 path, then cd and start interactive bash
             var psi = new System.Diagnostics.ProcessStartInfo
             {
-                FileName = msysBat,
-                Arguments = $"-shell {config.MSystem.ToLower()}",
-                UseShellExecute = true,
-                WorkingDirectory = projectRoot,
-                Environment =
-                {
-                    ["MSYSTEM"] = config.MSystem,
-                    ["CHERE_INVOKING"] = "1"
-                }
+                FileName = bash,
+                Arguments = $"-l -c \"cd $(cygpath -u '{projectRoot}') && exec bash\"",
+                UseShellExecute = false
             };
 
-            System.Diagnostics.Process.Start(psi)?.WaitForExit();
-            Environment.ExitCode = 0;
+            var process = System.Diagnostics.Process.Start(psi);
+
+            if (process != null)
+            {
+                // Wait for bash to exit, then return bash's exit code
+                process.WaitForExit();
+                Environment.ExitCode = process.ExitCode;
+            }
+            else
+            {
+                Environment.ExitCode = 1;
+            }
         });
         rootCommand.AddCommand(shell);
 

@@ -7,19 +7,17 @@ namespace Msys2Manager.CLI.Commands;
 
 public class UpdateCommand : Command
 {
-    public UpdateCommand() : base("update", "Update all MSYS2 packages")
+    public UpdateCommand() : base("update", "Update package database (pacman -Sy)")
     {
     }
 
     public new class Handler : ICommandHandler
     {
         private readonly IEnvironmentService _environment;
-        private readonly IConfigurationService _configuration;
 
-        public Handler(IEnvironmentService environment, IConfigurationService configuration)
+        public Handler(IEnvironmentService environment)
         {
             _environment = environment;
-            _configuration = configuration;
         }
 
         public int Invoke(InvocationContext context)
@@ -33,29 +31,22 @@ public class UpdateCommand : Command
 
             if (!_environment.IsMsys2Installed())
             {
-                console.Error.Write("MSYS2 is not installed. Run 'm2m bootstrap' first."
-);
+                console.Error.Write("MSYS2 is not installed. Run 'm2m bootstrap' first.\n");
                 return 1;
             }
 
-            console.Out.Write("Updating MSYS2 packages..."
-);
+            console.Out.Write("Updating package database...\n");
 
             try
             {
-                await _environment.UpdateAllPackagesAsync(context.GetCancellationToken());
+                await _environment.UpdatePackageListAsync(context.GetCancellationToken());
 
-                var lockFile = await _configuration.LoadLockFileAsync(context.GetCancellationToken());
-                await _configuration.SaveLockFileAsync(lockFile, context.GetCancellationToken());
-
-                console.Out.Write("Update complete."
-);
+                console.Out.Write("Package database updated.\n");
                 return 0;
             }
             catch (Exception ex)
             {
-                console.Error.Write($"Error: {ex.Message}"
-);
+                console.Error.Write($"Error: {ex.Message}\n");
                 return 1;
             }
         }
