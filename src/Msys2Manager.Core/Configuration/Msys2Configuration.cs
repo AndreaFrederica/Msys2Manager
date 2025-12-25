@@ -16,6 +16,7 @@ public class TaskDefinition
     public string? Command { get; set; }
     public string[]? Commands { get; set; }
     public string? Description { get; set; }
+    public string[]? DependsOn { get; set; }
 
     public string[] GetCommands()
     {

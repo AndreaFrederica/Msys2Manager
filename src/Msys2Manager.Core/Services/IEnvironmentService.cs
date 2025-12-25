@@ -200,8 +200,12 @@ public class EnvironmentService : IEnvironmentService
         Environment.SetEnvironmentVariable("MSYSTEM", config.MSystem);
         Environment.SetEnvironmentVariable("CHERE_INVOKING", "1");
 
+        // Convert Windows path separators to Unix-style for MSYS2 bash
+        // This handles paths like "install-release\launcher.exe" -> "install-release/launcher.exe"
+        var normalizedCommand = command.Replace('\\', '/');
+
         // Use cygpath inline to convert Windows path to MSYS2 path
-        var args = $"-l -c \"cd $(cygpath -u '{workingDirectory}') && {command}\"";
+        var args = $"-l -c \"cd $(cygpath -u '{workingDirectory}') && {normalizedCommand}\"";
 
         if (redirectOutput)
         {
